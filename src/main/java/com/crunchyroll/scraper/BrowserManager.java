@@ -32,16 +32,44 @@ public class BrowserManager implements AutoCloseable {
         if (headless) {
             options.addArguments("--headless=new");
         }
+
+        // Anti-detection options
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
         options.addArguments("--disable-gpu");
         options.addArguments("--window-size=1920,1080");
-        options.addArguments("--lang=en-US");
+        options.addArguments("--lang=de-DE,de");
         options.addArguments("--disable-blink-features=AutomationControlled");
-        options.setExperimentalOption("excludeSwitches", new String[]{"enable-automation"});
+        options.addArguments("--disable-extensions");
+        options.addArguments("--disable-infobars");
+        options.addArguments("--disable-popup-blocking");
+        options.addArguments("--start-maximized");
+        options.addArguments("--ignore-certificate-errors");
+
+        // Set a real user agent
+        options.addArguments("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+        // Experimental options to avoid detection
+        options.setExperimentalOption("excludeSwitches", new String[]{"enable-automation", "enable-logging"});
+        options.setExperimentalOption("useAutomationExtension", false);
+
+        // Preferences to avoid detection
+        java.util.Map<String, Object> prefs = new java.util.HashMap<>();
+        prefs.put("credentials_enable_service", false);
+        prefs.put("profile.password_manager_enabled", false);
+        options.setExperimentalOption("prefs", prefs);
 
         driver = new ChromeDriver(options);
         configureTimeouts();
+
+        // Execute script to mask webdriver
+        try {
+            ((org.openqa.selenium.JavascriptExecutor) driver).executeScript(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            );
+        } catch (Exception e) {
+            LOG.debug("Could not mask webdriver property: {}", e.getMessage());
+        }
 
         LOG.info("Chrome WebDriver initialized successfully");
         return driver;

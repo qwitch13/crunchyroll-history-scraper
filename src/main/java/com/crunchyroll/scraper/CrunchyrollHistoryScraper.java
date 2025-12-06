@@ -32,13 +32,15 @@ public class CrunchyrollHistoryScraper {
     private final WebDriverWait wait;
     private final String email;
     private final String password;
+    private final String profileName;
     private final Path outputPath;
 
-    public CrunchyrollHistoryScraper(WebDriver driver, String email, String password, Path outputPath) {
+    public CrunchyrollHistoryScraper(WebDriver driver, String email, String password, String profileName, Path outputPath) {
         this.driver = driver;
         this.wait = new WebDriverWait(driver, Duration.ofSeconds(30));
         this.email = email;
         this.password = password;
+        this.profileName = profileName;
         this.outputPath = outputPath;
     }
 
@@ -47,6 +49,7 @@ public class CrunchyrollHistoryScraper {
 
         try {
             login();
+            selectProfile();
             navigateToHistory();
             List<HistoryEntry> entries = scrapeHistory();
             exportToFile(entries);
@@ -64,31 +67,60 @@ public class CrunchyrollHistoryScraper {
         // Wait for and handle cookie consent if present
         handleCookieConsent();
 
+        // Check for and wait for CAPTCHA to be solved
+        waitForCaptcha();
+
         LOG.info("Entering credentials...");
         try {
-            // Wait for email field
-            WebElement emailField = wait.until(ExpectedConditions.presenceOfElementLocated(
-                    By.cssSelector("input[name='username'], input[type='email'], input#login_form_name")));
+            // Wait for SSO page to load (may redirect to sso.crunchyroll.com)
+            Thread.sleep(3000);
+
+            // Wait for email field - SSO page uses input fields
+            WebElement emailField = wait.until(ExpectedConditions.elementToBeClickable(
+                    By.cssSelector("input[type='email'], input[name='username'], input[autocomplete='email']")));
             emailField.clear();
             emailField.sendKeys(email);
+            LOG.info("Email entered");
 
-            // Find and fill password field
-            WebElement passwordField = driver.findElement(
-                    By.cssSelector("input[name='password'], input[type='password'], input#login_form_password"));
+            // Wait a moment for any field validation
+            Thread.sleep(500);
+
+            // Find and fill password field - must wait for it to be interactable
+            WebElement passwordField = wait.until(ExpectedConditions.elementToBeClickable(
+                    By.cssSelector("input[type='password'], input[name='password'], input[autocomplete='current-password']")));
             passwordField.clear();
             passwordField.sendKeys(password);
+            LOG.info("Password entered");
 
-            // Click login button
-            WebElement loginButton = driver.findElement(
-                    By.cssSelector("button[type='submit'], button[data-t='login-btn'], .login-button"));
-            loginButton.click();
+            // Wait a moment before clicking login
+            Thread.sleep(1000);
 
-            // Wait for login to complete - check for profile or history link
-            wait.until(ExpectedConditions.or(
-                    ExpectedConditions.urlContains("/home"),
-                    ExpectedConditions.urlContains("/de"),
+            // Click login button using JavaScript for reliability
+            WebElement loginButton = wait.until(ExpectedConditions.elementToBeClickable(
+                    By.cssSelector("button[type='submit'], form button, button[class*='submit'], button[class*='login']")));
+
+            // Try JavaScript click first (more reliable)
+            JavascriptExecutor js = (JavascriptExecutor) driver;
+            js.executeScript("arguments[0].click();", loginButton);
+            LOG.info("Login button clicked via JavaScript");
+
+            // Also try pressing Enter on password field as backup
+            Thread.sleep(500);
+            try {
+                passwordField.sendKeys(Keys.RETURN);
+                LOG.info("Enter key pressed");
+            } catch (Exception ignored) {}
+
+            // Wait for login to complete with longer timeout
+            WebDriverWait longWait = new WebDriverWait(driver, Duration.ofSeconds(60));
+            longWait.until(ExpectedConditions.or(
+                    ExpectedConditions.urlContains("crunchyroll.com/home"),
+                    ExpectedConditions.urlContains("crunchyroll.com/de"),
+                    ExpectedConditions.urlContains("crunchyroll.com/history"),
+                    ExpectedConditions.not(ExpectedConditions.urlContains("sso.crunchyroll.com")),
                     ExpectedConditions.presenceOfElementLocated(By.cssSelector("[data-t='header-profile-btn']")),
-                    ExpectedConditions.presenceOfElementLocated(By.cssSelector(".erc-profile-menu"))
+                    ExpectedConditions.presenceOfElementLocated(By.cssSelector(".erc-profile-menu")),
+                    ExpectedConditions.presenceOfElementLocated(By.cssSelector("[class*='profile']"))
             ));
 
             LOG.info("Login successful!");
@@ -119,22 +151,164 @@ public class CrunchyrollHistoryScraper {
         }
     }
 
+    private void waitForCaptcha() {
+        LOG.info("Checking for CAPTCHA...");
+
+        try {
+            // Check if there's a CAPTCHA/verification challenge
+            String pageSource = driver.getPageSource().toLowerCase();
+            String currentUrl = driver.getCurrentUrl().toLowerCase();
+
+            boolean hasCaptcha = pageSource.contains("captcha") ||
+                    pageSource.contains("verify you are human") ||
+                    pageSource.contains("verifying you are human") ||
+                    pageSource.contains("challenge") ||
+                    currentUrl.contains("challenge") ||
+                    currentUrl.contains("captcha");
+
+            if (hasCaptcha) {
+                LOG.warn("========================================");
+                LOG.warn("CAPTCHA DETECTED!");
+                LOG.warn("Please solve the CAPTCHA in the browser window.");
+                LOG.warn("The script will continue automatically once solved.");
+                LOG.warn("========================================");
+
+                takeScreenshot("captcha_detected");
+
+                // Wait up to 5 minutes for CAPTCHA to be solved
+                WebDriverWait captchaWait = new WebDriverWait(driver, Duration.ofSeconds(300));
+                captchaWait.until(driver -> {
+                    String source = driver.getPageSource().toLowerCase();
+                    String url = driver.getCurrentUrl().toLowerCase();
+
+                    // CAPTCHA is solved when we're no longer on a challenge page
+                    boolean stillHasCaptcha = source.contains("verify you are human") ||
+                            source.contains("verifying you are human") ||
+                            url.contains("challenge");
+
+                    if (!stillHasCaptcha) {
+                        LOG.info("CAPTCHA solved! Continuing...");
+                        return true;
+                    }
+                    return false;
+                });
+
+                // Give a moment for the page to settle
+                Thread.sleep(2000);
+            } else {
+                LOG.info("No CAPTCHA detected");
+            }
+        } catch (Exception e) {
+            LOG.warn("Error checking for CAPTCHA: {}. Continuing anyway...", e.getMessage());
+        }
+    }
+
+    private void selectProfile() {
+        LOG.info("Checking for profile selection page...");
+
+        try {
+            // Wait a bit for potential profile page
+            Thread.sleep(3000);
+
+            // Check if we're on a profile selection page
+            String currentUrl = driver.getCurrentUrl();
+            if (!currentUrl.contains("profile") && !currentUrl.contains("select")) {
+                // Try to find profile elements anyway
+                List<WebElement> profiles = driver.findElements(By.cssSelector(
+                        "[data-t='profile-item'], [class*='profile-item'], [class*='ProfileItem'], " +
+                        "div[class*='profile'] button, div[class*='Profile'] button"
+                ));
+
+                if (profiles.isEmpty()) {
+                    LOG.info("No profile selection page detected, continuing...");
+                    return;
+                }
+            }
+
+            LOG.info("Profile selection page detected. Looking for profile: {}", profileName);
+            takeScreenshot("profile_selection");
+
+            // Find the profile by name
+            WebElement targetProfile = null;
+
+            // Try various selectors to find profiles
+            List<WebElement> profileElements = driver.findElements(By.cssSelector(
+                    "[data-t='profile-item'], [class*='profile'], [class*='Profile'], " +
+                    "button[class*='profile'], div[role='button']"
+            ));
+
+            for (WebElement profile : profileElements) {
+                String text = profile.getText().toLowerCase();
+                if (text.contains(profileName.toLowerCase())) {
+                    targetProfile = profile;
+                    LOG.info("Found matching profile: {}", text);
+                    break;
+                }
+            }
+
+            // If not found by text, try finding by attribute
+            if (targetProfile == null) {
+                try {
+                    targetProfile = driver.findElement(By.xpath(
+                            "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '" +
+                            profileName.toLowerCase() + "')]"
+                    ));
+                } catch (NoSuchElementException ignored) {}
+            }
+
+            if (targetProfile != null) {
+                // Click the profile
+                JavascriptExecutor js = (JavascriptExecutor) driver;
+                js.executeScript("arguments[0].click();", targetProfile);
+                LOG.info("Profile '{}' selected", profileName);
+
+                // Wait for profile selection to complete
+                Thread.sleep(3000);
+            } else {
+                LOG.warn("Could not find profile '{}'. Available profiles:", profileName);
+                for (WebElement p : profileElements) {
+                    LOG.warn("  - {}", p.getText());
+                }
+                // Click the first profile as fallback
+                if (!profileElements.isEmpty()) {
+                    JavascriptExecutor js = (JavascriptExecutor) driver;
+                    js.executeScript("arguments[0].click();", profileElements.get(0));
+                    LOG.info("Selected first available profile as fallback");
+                    Thread.sleep(3000);
+                }
+            }
+        } catch (Exception e) {
+            LOG.warn("Error during profile selection: {}. Continuing anyway...", e.getMessage());
+        }
+    }
+
     private void navigateToHistory() {
         LOG.info("Navigating to history page...");
         driver.get(HISTORY_URL);
 
         try {
-            // Wait for history page to load
+            // Wait for page to fully load
+            Thread.sleep(5000);
+
+            // Take screenshot to debug
+            takeScreenshot("history_page");
+            LOG.info("Current URL: {}", driver.getCurrentUrl());
+
+            // Wait for any content to appear - broad selectors
             wait.until(ExpectedConditions.or(
                     ExpectedConditions.presenceOfElementLocated(By.cssSelector("[data-t='history-content']")),
-                    ExpectedConditions.presenceOfElementLocated(By.cssSelector(".history-content")),
-                    ExpectedConditions.presenceOfElementLocated(By.cssSelector(".erc-history-content")),
-                    ExpectedConditions.presenceOfElementLocated(By.cssSelector(".watchlist-card")),
-                    ExpectedConditions.presenceOfElementLocated(By.cssSelector("[class*='history']"))
+                    ExpectedConditions.presenceOfElementLocated(By.cssSelector("[class*='history']")),
+                    ExpectedConditions.presenceOfElementLocated(By.cssSelector("[class*='playable']")),
+                    ExpectedConditions.presenceOfElementLocated(By.cssSelector("[class*='browse']")),
+                    ExpectedConditions.presenceOfElementLocated(By.cssSelector("a[href*='/watch/']")),
+                    ExpectedConditions.presenceOfElementLocated(By.tagName("article"))
             ));
             LOG.info("History page loaded");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
             LOG.warn("Could not verify history page loaded, continuing anyway: {}", e.getMessage());
+            takeScreenshot("history_page_error");
         }
     }
 
@@ -143,50 +317,64 @@ public class CrunchyrollHistoryScraper {
         List<HistoryEntry> entries = new ArrayList<>();
         Set<String> seenUrls = new HashSet<>();
 
+        // Take initial screenshot for debugging
+        takeScreenshot("before_scraping");
+
         int previousCount = 0;
         int scrollAttempts = 0;
         int maxScrollAttempts = 100;
 
         while (scrollAttempts < maxScrollAttempts) {
-            // Find all history cards/items
-            List<WebElement> cards = findHistoryCards();
-
-            for (WebElement card : cards) {
-                try {
-                    HistoryEntry entry = extractEntryFromCard(card);
-                    if (entry != null && entry.url() != null && !seenUrls.contains(entry.url())) {
-                        seenUrls.add(entry.url());
-                        entries.add(entry);
-                    }
-                } catch (StaleElementReferenceException e) {
-                    // Element became stale, will be re-fetched on next iteration
-                    LOG.debug("Stale element, skipping...");
-                } catch (Exception e) {
-                    LOG.debug("Error extracting entry: {}", e.getMessage());
-                }
-            }
-
-            LOG.info("Found {} unique entries so far...", entries.size());
-
-            // Check if we found new entries
-            if (entries.size() == previousCount) {
-                scrollAttempts++;
-                if (scrollAttempts >= 3 && entries.size() > 0) {
-                    LOG.info("No new entries found after {} scroll attempts, finishing...", scrollAttempts);
-                    break;
-                }
-            } else {
-                scrollAttempts = 0;
-                previousCount = entries.size();
-            }
-
-            // Scroll down to load more
-            scrollDown();
             try {
-                Thread.sleep(1500); // Wait for content to load
+                // Find all history cards/items
+                List<WebElement> cards = findHistoryCards();
+
+                for (WebElement card : cards) {
+                    try {
+                        HistoryEntry entry = extractEntryFromCard(card);
+                        if (entry != null && entry.url() != null && !seenUrls.contains(entry.url())) {
+                            seenUrls.add(entry.url());
+                            entries.add(entry);
+                        }
+                    } catch (StaleElementReferenceException e) {
+                        LOG.debug("Stale element, skipping...");
+                    } catch (Exception e) {
+                        LOG.debug("Error extracting entry: {}", e.getMessage());
+                    }
+                }
+
+                LOG.info("Found {} unique entries so far...", entries.size());
+
+                // Check if we found new entries
+                if (entries.size() == previousCount) {
+                    scrollAttempts++;
+                    if (scrollAttempts >= 3) {
+                        if (entries.size() > 0) {
+                            LOG.info("No new entries found after {} scroll attempts, finishing...", scrollAttempts);
+                        } else {
+                            LOG.warn("No entries found. Taking debug screenshot...");
+                            takeScreenshot("no_entries_found");
+                        }
+                        break;
+                    }
+                } else {
+                    scrollAttempts = 0;
+                    previousCount = entries.size();
+                }
+
+                // Scroll down to load more
+                scrollDown();
+                Thread.sleep(1500);
+
+            } catch (NoSuchSessionException e) {
+                LOG.error("Browser session lost. Entries collected so far: {}", entries.size());
+                break;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
+            } catch (Exception e) {
+                LOG.warn("Error during scraping: {}. Continuing...", e.getMessage());
+                scrollAttempts++;
             }
         }
 
@@ -413,12 +601,13 @@ public class CrunchyrollHistoryScraper {
     }
 
     public static void main(String[] args) {
-        if (args.length < 2) {
-            System.out.println("Usage: java -jar crunchyroll-scraper.jar <email> <password> [output-path]");
+        if (args.length < 3) {
+            System.out.println("Usage: java -jar crunchyroll-scraper.jar <email> <password> <profile> [output-path]");
             System.out.println();
             System.out.println("Arguments:");
             System.out.println("  email        Your Crunchyroll email");
             System.out.println("  password     Your Crunchyroll password");
+            System.out.println("  profile      Profile name to select (e.g., 'yuy13')");
             System.out.println("  output-path  (Optional) Path for output file");
             System.out.println("               Default: ~/Documents/YYYY-MM-DD.HH-mm-ss.crunchy.log");
             System.exit(1);
@@ -426,10 +615,11 @@ public class CrunchyrollHistoryScraper {
 
         String email = args[0];
         String password = args[1];
+        String profileName = args[2];
 
         Path outputPath;
-        if (args.length >= 3) {
-            outputPath = Path.of(args[2]);
+        if (args.length >= 4) {
+            outputPath = Path.of(args[3]);
         } else {
             String filename = LocalDateTime.now().format(FILE_FORMAT) + ".crunchy.log";
             outputPath = Path.of(System.getProperty("user.home"), "Documents", filename);
@@ -440,7 +630,7 @@ public class CrunchyrollHistoryScraper {
         try (BrowserManager browserManager = new BrowserManager(headless)) {
             WebDriver driver = browserManager.initChrome();
 
-            CrunchyrollHistoryScraper scraper = new CrunchyrollHistoryScraper(driver, email, password, outputPath);
+            CrunchyrollHistoryScraper scraper = new CrunchyrollHistoryScraper(driver, email, password, profileName, outputPath);
             scraper.run();
 
         } catch (Exception e) {
