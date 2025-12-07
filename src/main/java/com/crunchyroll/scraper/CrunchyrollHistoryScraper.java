@@ -26,6 +26,7 @@ public class CrunchyrollHistoryScraper {
 
     private static final String LOGIN_URL = "https://www.crunchyroll.com/de/login";
     private static final String HISTORY_URL = "https://www.crunchyroll.com/de/history";
+    private static final String HISTORY_URL_EN = "https://www.crunchyroll.com/history";
     private static final DateTimeFormatter FILE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd.HH-mm-ss");
 
     private final WebDriver driver;
@@ -34,7 +35,11 @@ public class CrunchyrollHistoryScraper {
     private final String password;
     private final String profileName;
     private final Path outputPath;
+    private final boolean manualMode;
 
+    /**
+     * Constructor for automatic mode (handles login automatically).
+     */
     public CrunchyrollHistoryScraper(WebDriver driver, String email, String password, String profileName, Path outputPath) {
         this.driver = driver;
         this.wait = new WebDriverWait(driver, Duration.ofSeconds(30));
@@ -42,6 +47,20 @@ public class CrunchyrollHistoryScraper {
         this.password = password;
         this.profileName = profileName;
         this.outputPath = outputPath;
+        this.manualMode = false;
+    }
+
+    /**
+     * Constructor for manual mode (user handles login in their browser).
+     */
+    public CrunchyrollHistoryScraper(WebDriver driver, Path outputPath) {
+        this.driver = driver;
+        this.wait = new WebDriverWait(driver, Duration.ofSeconds(30));
+        this.email = null;
+        this.password = null;
+        this.profileName = null;
+        this.outputPath = outputPath;
+        this.manualMode = true;
     }
 
     public void run() throws IOException {
@@ -57,6 +76,65 @@ public class CrunchyrollHistoryScraper {
         } catch (Exception e) {
             LOG.error("Scraping failed: {}", e.getMessage(), e);
             throw e;
+        }
+    }
+
+    /**
+     * Manual mode: waits for user to navigate to history page, then scrapes.
+     * This avoids bot detection by letting user handle login manually.
+     */
+    public void runManual() throws IOException {
+        LOG.info("Starting Crunchyroll History Scraper (MANUAL MODE)");
+        LOG.info("========================================");
+        LOG.info("Please open Chrome with remote debugging:");
+        LOG.info("  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222");
+        LOG.info("");
+        LOG.info("Then:");
+        LOG.info("  1. Navigate to https://www.crunchyroll.com");
+        LOG.info("  2. Log in to your account manually");
+        LOG.info("  3. Navigate to https://www.crunchyroll.com/history");
+        LOG.info("");
+        LOG.info("Waiting for history page...");
+        LOG.info("========================================");
+
+        try {
+            waitForHistoryPage();
+            LOG.info("History page detected! Starting scrape...");
+
+            List<HistoryEntry> entries = scrapeHistory();
+            exportToFile(entries);
+            LOG.info("Scraping completed successfully! Found {} entries", entries.size());
+        } catch (Exception e) {
+            LOG.error("Scraping failed: {}", e.getMessage(), e);
+            throw e;
+        }
+    }
+
+    /**
+     * Waits for user to navigate to the Crunchyroll history page.
+     */
+    private void waitForHistoryPage() {
+        LOG.info("Monitoring browser for history page...");
+
+        WebDriverWait longWait = new WebDriverWait(driver, Duration.ofSeconds(600)); // 10 minutes
+        longWait.until(driver -> {
+            String url = driver.getCurrentUrl().toLowerCase();
+            boolean isHistoryPage = url.contains("crunchyroll.com/history") ||
+                    url.contains("crunchyroll.com/de/history") ||
+                    url.contains("crunchyroll.com/en/history");
+
+            if (!isHistoryPage) {
+                // Log current URL every few seconds to show progress
+                LOG.debug("Current URL: {} (waiting for history page)", url);
+            }
+            return isHistoryPage;
+        });
+
+        // Give page time to fully load
+        try {
+            Thread.sleep(3000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -601,25 +679,42 @@ public class CrunchyrollHistoryScraper {
     }
 
     public static void main(String[] args) {
-        if (args.length < 3) {
-            System.out.println("Usage: java -jar crunchyroll-scraper.jar <email> <password> <profile> [output-path]");
-            System.out.println();
-            System.out.println("Arguments:");
-            System.out.println("  email        Your Crunchyroll email");
-            System.out.println("  password     Your Crunchyroll password");
-            System.out.println("  profile      Profile name to select (e.g., 'yuy13')");
-            System.out.println("  output-path  (Optional) Path for output file");
-            System.out.println("               Default: ~/Documents/YYYY-MM-DD.HH-mm-ss.crunchy.log");
+        boolean manualMode = false;
+        String outputPathArg = null;
+
+        // Parse arguments
+        List<String> positionalArgs = new ArrayList<>();
+        for (String arg : args) {
+            if (arg.equals("--manual") || arg.equals("-m")) {
+                manualMode = true;
+            } else if (arg.startsWith("--output=")) {
+                outputPathArg = arg.substring("--output=".length());
+            } else if (!arg.startsWith("-")) {
+                positionalArgs.add(arg);
+            }
+        }
+
+        // Manual mode: connect to existing browser
+        if (manualMode) {
+            runManualMode(outputPathArg);
+            return;
+        }
+
+        // Automatic mode: requires credentials
+        if (positionalArgs.size() < 3) {
+            printUsage();
             System.exit(1);
         }
 
-        String email = args[0];
-        String password = args[1];
-        String profileName = args[2];
+        String email = positionalArgs.get(0);
+        String password = positionalArgs.get(1);
+        String profileName = positionalArgs.get(2);
 
         Path outputPath;
-        if (args.length >= 4) {
-            outputPath = Path.of(args[3]);
+        if (positionalArgs.size() >= 4) {
+            outputPath = Path.of(positionalArgs.get(3));
+        } else if (outputPathArg != null) {
+            outputPath = Path.of(outputPathArg);
         } else {
             String filename = LocalDateTime.now().format(FILE_FORMAT) + ".crunchy.log";
             outputPath = Path.of(System.getProperty("user.home"), "Documents", filename);
@@ -637,5 +732,86 @@ public class CrunchyrollHistoryScraper {
             LOG.error("Scraper failed: {}", e.getMessage(), e);
             System.exit(1);
         }
+    }
+
+    private static void runManualMode(String outputPathArg) {
+        Path outputPath;
+        if (outputPathArg != null) {
+            outputPath = Path.of(outputPathArg);
+        } else {
+            String filename = LocalDateTime.now().format(FILE_FORMAT) + ".crunchy.log";
+            outputPath = Path.of(System.getProperty("user.home"), "Documents", filename);
+        }
+
+        int debugPort = Integer.parseInt(System.getProperty("debug.port",
+                String.valueOf(BrowserManager.DEFAULT_DEBUG_PORT)));
+
+        System.out.println();
+        System.out.println("=== MANUAL MODE ===");
+        System.out.println();
+        System.out.println("Step 1: Start Chrome with remote debugging (if not already running):");
+        System.out.println();
+        System.out.println("  Mac:");
+        System.out.println("    /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=" + debugPort);
+        System.out.println();
+        System.out.println("  Windows:");
+        System.out.println("    chrome.exe --remote-debugging-port=" + debugPort);
+        System.out.println();
+        System.out.println("  Linux:");
+        System.out.println("    google-chrome --remote-debugging-port=" + debugPort);
+        System.out.println();
+        System.out.println("Step 2: Log in to Crunchyroll manually in that browser");
+        System.out.println();
+        System.out.println("Step 3: Navigate to: https://www.crunchyroll.com/history");
+        System.out.println();
+        System.out.println("The scraper will automatically detect the history page and start scraping!");
+        System.out.println();
+        System.out.println("Connecting to Chrome on port " + debugPort + "...");
+        System.out.println();
+
+        try (BrowserManager browserManager = new BrowserManager(false)) {
+            WebDriver driver = browserManager.connectToExistingChrome(debugPort);
+
+            CrunchyrollHistoryScraper scraper = new CrunchyrollHistoryScraper(driver, outputPath);
+            scraper.runManual();
+
+        } catch (Exception e) {
+            LOG.error("Scraper failed: {}", e.getMessage(), e);
+            System.out.println();
+            System.out.println("ERROR: Could not connect to Chrome. Make sure:");
+            System.out.println("  1. Chrome is running with --remote-debugging-port=" + debugPort);
+            System.out.println("  2. No other process is using port " + debugPort);
+            System.out.println();
+            System.exit(1);
+        }
+    }
+
+    private static void printUsage() {
+        System.out.println("Crunchyroll History Scraper");
+        System.out.println();
+        System.out.println("Usage:");
+        System.out.println();
+        System.out.println("  MANUAL MODE (recommended - avoids bot detection):");
+        System.out.println("    java -jar crunchyroll-scraper.jar --manual [--output=path]");
+        System.out.println();
+        System.out.println("    Connects to your existing Chrome browser where you've already logged in.");
+        System.out.println("    Start Chrome with: --remote-debugging-port=9222");
+        System.out.println();
+        System.out.println("  AUTOMATIC MODE (may trigger bot detection):");
+        System.out.println("    java -jar crunchyroll-scraper.jar <email> <password> <profile> [output-path]");
+        System.out.println();
+        System.out.println("Arguments:");
+        System.out.println("  --manual, -m    Use manual mode (connect to existing Chrome)");
+        System.out.println("  --output=PATH   Specify output file path");
+        System.out.println("  email           Your Crunchyroll email (automatic mode)");
+        System.out.println("  password        Your Crunchyroll password (automatic mode)");
+        System.out.println("  profile         Profile name to select (automatic mode)");
+        System.out.println();
+        System.out.println("Environment Variables:");
+        System.out.println("  -Ddebug.port=PORT   Chrome debug port (default: 9222)");
+        System.out.println("  -Dheadless=true     Run in headless mode (automatic mode only)");
+        System.out.println();
+        System.out.println("Output:");
+        System.out.println("  Default: ~/Documents/YYYY-MM-DD.HH-mm-ss.crunchy.log");
     }
 }

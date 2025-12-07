@@ -16,12 +16,37 @@ import java.time.Duration;
  */
 public class BrowserManager implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(BrowserManager.class);
+    public static final int DEFAULT_DEBUG_PORT = 9222;
 
     private WebDriver driver;
     private final boolean headless;
+    private boolean isManualMode = false;
 
     public BrowserManager(boolean headless) {
         this.headless = headless;
+    }
+
+    /**
+     * Connect to an existing Chrome browser with remote debugging enabled.
+     * User must start Chrome with: --remote-debugging-port=9222
+     */
+    public WebDriver connectToExistingChrome(int debugPort) {
+        LOG.info("Connecting to existing Chrome on debug port {}...", debugPort);
+        WebDriverManager.chromedriver().setup();
+
+        ChromeOptions options = new ChromeOptions();
+        options.setExperimentalOption("debuggerAddress", "localhost:" + debugPort);
+
+        driver = new ChromeDriver(options);
+        configureTimeouts();
+        isManualMode = true;
+
+        LOG.info("Connected to existing Chrome browser successfully");
+        return driver;
+    }
+
+    public boolean isManualMode() {
+        return isManualMode;
     }
 
     public WebDriver initChrome() {
@@ -106,11 +131,15 @@ public class BrowserManager implements AutoCloseable {
     @Override
     public void close() {
         if (driver != null) {
-            LOG.info("Closing WebDriver...");
-            try {
-                driver.quit();
-            } catch (Exception e) {
-                LOG.warn("Error closing WebDriver: {}", e.getMessage());
+            if (isManualMode) {
+                LOG.info("Manual mode: leaving browser open for user");
+            } else {
+                LOG.info("Closing WebDriver...");
+                try {
+                    driver.quit();
+                } catch (Exception e) {
+                    LOG.warn("Error closing WebDriver: {}", e.getMessage());
+                }
             }
         }
     }
